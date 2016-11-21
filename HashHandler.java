@@ -1,10 +1,14 @@
-//Thomas Brown
-
 package client;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 
+/**
+ * Handles hash functions.
+ * 
+ * @author thomas brown
+ *
+ */
 public class HashHandler {	
 	/**
 	 * Compares hashes contained in two byte arrays for a file or piece of file.

@@ -3,19 +3,28 @@ package client;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.net.Socket;
 import java.net.UnknownHostException;
-import java.nio.ByteBuffer;
 
+/**
+ * 
+ * Peer communication handler.
+ * 
+ * @author thomas brown
+ *
+ */
 public class PeerCommHandler {
 	private Socket peerSocket;
 	private DataInputStream peerMessage;
 	private DataOutputStream clientMessage;
 	
-
-	
+	/**
+	 * Handler constructor. Opens a TCP connection to <IP>:<port>, sets keep alive on, and gets the I/O streams
+	 * for the connection.
+	 * 
+	 * @param IP - IP address of peer.
+	 * @param port - port of peer.
+	 */
 	public PeerCommHandler(String IP, int port) {
 		try {
 			openConnection(IP, port);
@@ -54,56 +63,62 @@ public class PeerCommHandler {
 		for (int i = 1; i <= 10; i++) {
 			try {
 				begin = System.nanoTime();
+				
 				Socket socket = new Socket(IP, port);
-				OutputStream clientMessage = socket.getOutputStream();
-				InputStream peerResponse = socket.getInputStream();
+				DataOutputStream clientMessage = new DataOutputStream (socket.getOutputStream());
+				DataInputStream peerResponse = new DataInputStream(socket.getInputStream());
+				byte[] peerHandshake = new byte[68];
 		
 				//Send handshake to peer.
-				clientMessage.write((byte) 19);
-				clientMessage.write("BitTorrent protocol00000000".getBytes());
+				clientMessage.writeByte(19);
+				clientMessage.writeBytes("BitTorrent protocol00000000");
 				clientMessage.write(infoHash);
-				clientMessage.write(peerID.getBytes());
-				
-				byte[] peerHandshake = new byte[68];
+				clientMessage.writeBytes(peerID);
+
 				peerResponse.read(peerHandshake);
 				
 				end = System.nanoTime();
 				
 				average += (end - begin);
+				
+				peerResponse.close();
+				clientMessage.close();
 				socket.close();
 			} catch (IOException ioe) {
-				System.err.println("ERROR: An I/O error occurred trying to open a TCP socket to a peer: " + ioe.getMessage() + "\n");
+				System.err.println("ERROR: An I/O error occurred trying to get best peer: " + ioe.getMessage() + "\n");
 				ioe.printStackTrace();
 			}
 		}
 		
+		System.out.println("Peer " + peerID + " @ " + IP + ":" + port + " had an average RTT of " + average/10 + ".");
+		
 		return average/10;
 	}
 	
+	/**
+	 * Get a message sent by the peer.
+	 * 
+	 * @return a BTMessage object containing the length prefix, messageID, message type, and payload of this message.
+	 * @throws IOException
+	 */
 	public BTMessage getMessage() throws IOException {
 		BTMessage message = new BTMessage();
-		byte[] messageBytes = new byte[4]; 
-		ByteBuffer buffer = null;
+		byte[] payload = null;
 		int length = -1;
 		int msgID = -1;
 		
-		peerMessage.read(messageBytes, 0, 4);
-		buffer = ByteBuffer.wrap(messageBytes, 0, 4);
-		System.out.println("\tReceived new message reading:");
-		for (int i = 0; i < messageBytes.length; i++) {
-			System.out.println("\t" + Byte.toString(messageBytes[i]));
-		}
-		message.setLength(buffer.getInt());
+		//System.out.println("\tAttempting to read new message length...");
+		
+		length = peerMessage.readInt();
+		message.setLength(length);
+		
+		//System.out.println("\tRead. Getting message ID...");
 		
 		if (length != 0) {
-			messageBytes = new byte[1];
-			peerMessage.read(messageBytes, 0, 1);
-			System.out.println("\t" + Byte.toString(messageBytes[0]) + "\n");
-			buffer = ByteBuffer.wrap(messageBytes);
-			message.setMessageID(buffer.get());
+			msgID = peerMessage.read();
+			message.setMessageID(msgID);
+			//System.out.println("\tDone. Parsing message type...");
 		}
-		
-	//	System.out.println("\tRead this message's length as " + length + " and msgID as (will be -1 if keep-alive) " + msgID + ".");
 		
 		if (message.getLength() == 1) {
 		
@@ -127,29 +142,31 @@ public class PeerCommHandler {
 			
 		} else if (message.getLength() == 5 && message.getMessageID() == 4) {
 			
+			//Skip over the have message. Payload is a constant 4 bytes.
 			message.setMessageType(MessageType.HAVE);
-			messageBytes = new byte[message.getLength() - 1];
-			peerMessage.read(messageBytes, 0, message.getLength() - 1);
-			message.setPayload(messageBytes);
+			peerMessage.skip(4);
 		
 		} else if (message.getMessageID() == 5) {
 		
+			//Skip over the bitfield message (-1 because we already read the message ID, which is included in length)
 			message.setMessageType(MessageType.BITFIELD);
-			messageBytes = new byte[message.getLength() - 1];
-			peerMessage.read(messageBytes, 0, message.getLength() - 1);
-			message.setPayload(messageBytes);
+			peerMessage.skip(length - 1);
 		
 		} else if (message.getMessageID() == 7) {
 		
 			message.setMessageType(MessageType.PIECE);
-			messageBytes = new byte[message.getLength() - 9];
-		
+			payload = new byte[length - 9];		
+			
 			if (peerMessage.skip(8) == 8) {
-				peerMessage.read(messageBytes, 0, message.getLength() - 9);
-				message.setPayload(messageBytes);
+			
+				peerMessage.readFully(payload, 0, length-9);
+				message.setPayload(payload);
+				
 			}
 		
 		}
+		
+		//System.out.println("\tComplete.\n");
 		
 		return message;
 	}
@@ -170,32 +187,52 @@ public class PeerCommHandler {
 			                 + "The message was: " + ioe.getMessage());
 		}
 	}
-	
+
+	/**
+	 * Unimplemented message to send a bitfield. Not in use at the moment because we are not seeding.
+	 */
 	public void sendBitfield() {
-	
+		System.out.println("\tSending bitfield message to peer.\n");
+		return;
 	}
 	
+	/**
+	 * Send a choke message.
+	 * 
+	 * @throws IOException
+	 */
 	private void sendChoke() throws IOException {
-		clientMessage.write(ByteBuffer.allocate(4).putInt(1).array());
-		clientMessage.write((byte) 0);
+		System.out.println("\tSending choke message to peer.\n");
+		clientMessage.writeInt(1);
+		clientMessage.writeByte(0);
 	}
 	
+	/**
+	 * Send an interested message.
+	 * 
+	 * @throws IOException
+	 */
 	private void sendInterested() throws IOException {
-		byte[] b = ByteBuffer.allocate(4).putInt(1).array();
-		System.out.println("\tNext message reads:");
-		for (int i = 0; i < b.length; i++) {
-			System.out.println("\t" + Byte.toString(b[i]));
-		}
-		clientMessage.write(ByteBuffer.allocate(4).putInt(1).array());
-		clientMessage.write((byte) 2);
-		System.out.println("\t" + Byte.toString((byte) 2) + "\n");
-		
+		System.out.println("\tSending interested message to peer.\n");
+		clientMessage.writeInt(1);
+		clientMessage.writeByte(2);
 	}
 	
+	/**
+	 * Send a keep-alive message.
+	 * @throws IOException
+	 */
 	private void sendKeepAlive() throws IOException {
-		clientMessage.write(ByteBuffer.allocate(4).putInt(0).array());
+		System.out.println("\tSending keep-alive message to peer.\n");
+		clientMessage.writeInt(0);
 	}
 	
+	/**
+	 * Public-facing interface to send a message of the specified type.
+	 * 
+	 * @param type - enumerated MessageType of the message we are trying to send.
+	 * @throws IOException
+	 */
 	public void sendMessage(MessageType type) throws IOException {
 		switch (type) {
 			case KEEP_ALIVE: 
@@ -218,29 +255,58 @@ public class PeerCommHandler {
 		}
 	}
 	
+	/**
+	 * Send a not-interested message.
+	 * 
+	 * @throws IOException
+	 */
 	private void sendNotInterested() throws IOException {
-		clientMessage.write(ByteBuffer.allocate(4).putInt(1).array());
-		clientMessage.write((byte) 3);
+		System.out.println("\tSending uninterested message to peer.\n");
+		clientMessage.writeInt(1);
+		clientMessage.writeByte(3);
 	}
 	
+	/**
+	 * Send a request for a new piece/block of the file.
+	 * 
+	 * @param index - the piece number
+	 * @param begin - the byte offset within the piece
+	 * @param length - how many bytes to request
+	 * @throws IOException
+	 */
 	public void sendRequest(int index, int begin, int length) throws IOException {
-		clientMessage.write(ByteBuffer.allocate(4).putInt(13).array());
-		clientMessage.write((byte) 6);
-		clientMessage.write(ByteBuffer.allocate(4).putInt(index).array());
-		clientMessage.write(ByteBuffer.allocate(4).putInt(begin).array());
-		clientMessage.write(ByteBuffer.allocate(4).putInt(length).array());
+		System.out.println("\tSending request for " + length + " bytes at index " + index + " / offset " + begin + " to peer.\n");
+		clientMessage.writeInt(13);
+		clientMessage.writeByte(6);
+		clientMessage.writeInt(index);
+		clientMessage.writeInt(begin);
+		clientMessage.writeInt(length);
 	}
 	
+	/**
+	 * Send an unchoke message.
+	 * 
+	 * @throws IOException
+	 */
 	private void sendUnchoke() throws IOException {
-		clientMessage.write(ByteBuffer.allocate(4).putInt(1).array());
-		clientMessage.write((byte) 1);
+		System.out.println("\tSending unchoke message to peer.\n");
+		clientMessage.writeInt(1);
+		clientMessage.writeByte(1);
 	}
 	
+	/**
+	 * Send a handshake to the peer.
+	 * 
+	 * @param hashBytes - a byte array containing the hash of this file.
+	 * @param peerID - this machine's peer ID.
+	 * @throws IOException 
+	 */
 	public void sendHandshake(byte[] hashBytes, String peerID) throws IOException {
-		clientMessage.write((byte) 19);
-		clientMessage.write("BitTorrent protocol00000000".getBytes());
+		System.out.println("\tSending handshake to peer.\n");
+		clientMessage.writeByte(19);
+		clientMessage.writeBytes("BitTorrent protocol00000000");
 		clientMessage.write(hashBytes);
-		clientMessage.write(peerID.getBytes());
+		clientMessage.writeBytes(peerID);
 	}
 	
 	/**
@@ -252,7 +318,7 @@ public class PeerCommHandler {
 	 */
 	public boolean readHandshakeAndCompare(byte[] hashBytes) throws IOException {
 		byte[] handshake = new byte[68];
-		peerMessage.read(handshake);
+		peerMessage.readFully(handshake);
 		
 		if (!HashHandler.compareHash(hashBytes, handshake, 0, 28)) {
 			System.err.println("ERROR: could not validate the SHA1 hash provided by the peer against a known hash.\n");
@@ -261,9 +327,5 @@ public class PeerCommHandler {
 		}
 		
 		return true;
-	}
-	
-	public void readMessage() {
-	
 	}
 }

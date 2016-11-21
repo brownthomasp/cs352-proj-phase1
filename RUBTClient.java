@@ -1,52 +1,41 @@
-//Thomas Brown
-
 package client;
 
 import GivenTools.*;
 import java.io.ByteArrayOutputStream;
 import java.io.FileOutputStream;
-import java.io.InputStream;
 import java.io.IOException;
-import java.io.OutputStream;
-import java.net.Socket;
-import java.net.URL;
-import java.net.URLConnection;
 import java.nio.ByteBuffer;
-//import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.AbstractList;
 import java.util.Iterator;
 import java.util.Map;
-import java.util.Set;
-//import java.util.Random;
-import java.util.UUID;
 
+/**
+ * Main RU bittorrent client. RU New Brunswick, CS352, Fall 2016
+ * 
+ * @author thomas brown
+ *
+ */
 public class RUBTClient {
 	public static void main(String[] args) {
 
 /*-----Variables-----*/
 
-			AbstractList peerList = null;
+			AbstractList peerList = null; //A list of peers, extracted from the tracker response.
 	
 			boolean isNotChoked = false; //Whether the BT connection is choked or not.
 	
 			byte[] torrentMetadata = null; //Torrent metadata.
 			byte[] trackerResponseBytes = null; //Tracker's response to info about a file.
-			byte[] peerHandshake = null; //Peer handshake.
-			byte[] peerMessage = null; //Peer message.
 	
 			ByteArrayOutputStream pieceBuffer = new ByteArrayOutputStream(); //Holds the bytes for a piece until we are ready to write to file.
 	
 			ByteBuffer keyBuffer = null; //Used for looking up keys in the bencoded dictionary of peers.
 	
 			FileOutputStream fileWriter = null; //Writes file to drive.
-	
-			InputStream trackerResponse = null; //Tracker's response stream.
-			InputStream peerResponse = null; //Peer's response stream to the client.
 	
 			int blockLength = 0; //The length of the block returned by the peer.
 			int bytesLeftForThisFile = 0; //Number of bytes left to download for the file overall.
@@ -56,35 +45,29 @@ public class RUBTClient {
 			int pieceOffset = 0; //Specifies the byte offset when requesting a new block of this piece.
 			int thisPieceLength = 0; //How long this piece is.
 	
-			long thisPeerRTT = 0;
-			long currentBestRTT = -1;
+			long downloadStart = 0; //Time when download began.
+			long downloadEnd = 0; //Time when download ended.
+			long thisPeerRTT = 0; //RTT to current peer.
+			long currentBestRTT = -1; //RTT to best peer, at this time.
 	
-			Map responseData = null;
-			Map thisPeer = null;
+			Map responseData = null; //Map of K,V pairs that the tracker sent back.
+			Map thisPeer = null; //Map from this peer to it's various fields (IP, port, peerID)
 	
-			Node<PeerInfo> ruPeers = null;
+			Node<PeerInfo> ruPeers = null; //Head of a linked list of PeerInfo objects.
 	
-			OutputStream clientMessage = null; //Output stream from the client to the peer.
+			PeerCommHandler peerCommHandler = null; //Handler class for communication with the peer.
 	
-			PeerCommHandler peerCommHandler = null;
-	
-			PeerInfo thisPeerInfo = null; 
+			PeerInfo thisPeerInfo = null; //Object representing a peer with fields (IP, port, peerID)
 			PeerInfo bestPeer = null; //Peer to whom we have the best (i.e. fastest) connection.
 	
 			Path pathToTorrent = null; //Path to torrent metadata file.
 	
-			Socket socket = null; //TCP socket to connect to peer.
-	
 			String srcTorrent = null; //Command line arg specifying torrent metadata file name.
 			String destFile = null; //Command line arg specfiying the file name to save the torrent to.
-			String peerID = null; //This client's peerID.
-			String infoHash = null; //String represenation of the SHA1 hash of this torrent.
 	
 			TorrentInfo torrentInfo = null; //Object which holds descriptive info regarding the torrent.
 	
-			URL trackerURL = null; //URL of the tracker.
-	
-			URLConnection conn = null; //Connection to the tracker.
+			TrackerCommHandler trackerCommHandler = null; //Handler class for communication with the tracker.
 
 /*-----End-Variables-----*/
 
@@ -100,7 +83,7 @@ public class RUBTClient {
 			srcTorrent = args[0];
 			destFile = args[1];
 			
-			System.out.println("---BEGIN DEBUG LOG---\n");
+			System.out.println("-----BEGIN-LOG-----\n");
 			
 			try {
 				//Get path to torrent file and read it into a new TorrentInfo object. Extract needed data from this object.
@@ -114,20 +97,11 @@ public class RUBTClient {
 				thisPieceLength = torrentInfo.piece_length;
 				
 				//Create a new unique peer ID and get the SHA1 hash of the torrent in string form, for passing via URL.
-				peerID = generatePeerID();
-				infoHash = HashHandler.convertHashToString(torrentInfo.info_hash.array());
-				
-				//Create new URL for the tracker and connect.
-				trackerURL = new URL(torrentInfo.announce_url.toString()
-                                       + "?" + "info_hash=" + HTTPescape(infoHash)
-                                       + "&peer_id=" + peerID + "&port=6881&uploaded=0&downloaded=0"
-                                       + "&left=" + torrentInfo.file_length + "&event=started");
-				conn = trackerURL.openConnection();
-				
-				//Get tracker's response incl. peer list and read into a local byte array.
-				trackerResponseBytes = new byte[conn.getContentLength()];
-				trackerResponse = conn.getInputStream();
-				trackerResponse.read(trackerResponseBytes);
+				trackerCommHandler = new TrackerCommHandler();
+				trackerCommHandler.setPeerID();
+				trackerCommHandler.setTorrentInfo(torrentInfo);
+				trackerCommHandler.connect();
+				trackerResponseBytes = trackerCommHandler.readResponse();
 				
 				try {
 					//Decode a map from the tracker's response. 
@@ -156,7 +130,7 @@ public class RUBTClient {
 						String thisPeerID = new String(thisPeerIDBuffer.array());
 						
 						//If this is an RU peer, store its info into a list of peers.
-						if (thisPeerID.substring(0, 3).equals("-RU")) {
+						if (thisPeerID.substring(0, 7).equals("-RU1103")) {
 							thisPeerInfo = new PeerInfo();
 							thisPeerInfo.setPeerID(thisPeerID);
 							
@@ -174,28 +148,20 @@ public class RUBTClient {
 					} 
 					
 					for (Node<PeerInfo> ptr = ruPeers; ptr != null; ptr = ptr.getNext()) {
-						System.out.println("\tPeerID: " + ptr.getData().getPeerID());
-						System.out.println("\tIP Address: " + ptr.getData().getIP());
-						System.out.println("\tPort: " + ptr.getData().getPort() + "\n");
 						
-						thisPeerRTT = PeerCommHandler.getAverageRTT(ptr.getData().getIP(), ptr.getData().getPort(), torrentInfo.info_hash.array(), peerID);
+						thisPeerRTT = PeerCommHandler.getAverageRTT(ptr.getData().getIP(), ptr.getData().getPort(), torrentInfo.info_hash.array(), trackerCommHandler.getPeerID());
 						
 						if (currentBestRTT == -1 || thisPeerRTT < currentBestRTT) {
-							System.out.println("\tThis peer (" + thisPeerRTT + ") is a better peer than the current best (" + currentBestRTT + ").");
 							currentBestRTT = thisPeerRTT;
 							bestPeer = ptr.getData();
 						}
-						
-						System.out.println("\tNew/current best is " + currentBestRTT + "\n");
 					}
 					
-					System.out.println("\tBest Peer:");
+					System.out.println("\n\tBest Peer:");
 					System.out.println("\t\tPeerID: " + bestPeer.getPeerID());
 					System.out.println("\t\tIP Address: " + bestPeer.getIP());
 					System.out.println("\t\tPort: " + bestPeer.getPort() + "\n");
 					
-					trackerResponse.close();
-
 				} catch (BencodingException be) {
 					System.err.println("ERROR: The tracker's response was not properly bencoded.\n"
                                      + be.getMessage());
@@ -203,47 +169,46 @@ public class RUBTClient {
 				
 				System.out.println("\tEstablishing connection with best peer.\n");
 				peerCommHandler = new PeerCommHandler(bestPeer.getIP(), bestPeer.getPort());
-				peerCommHandler.sendHandshake(torrentInfo.info_hash.array(), peerID);
+				peerCommHandler.sendHandshake(torrentInfo.info_hash.array(), trackerCommHandler.getPeerID());
 				
 				if (peerCommHandler.readHandshakeAndCompare(torrentInfo.info_hash.array()) == false) {
 					System.err.println("ERROR: peer did not handshake with the correct hash.");
 					return;
-				} else {
-					peerCommHandler.sendMessage(MessageType.INTERESTED);
-					System.out.println("\tSent interested message.\n");
 				}
 
 				fileWriter = new FileOutputStream(destFile);
-
-				peerMessage = new byte[32768];
+				
 				bytesLeftForThisPiece = torrentInfo.piece_length;
+				
+				downloadStart = System.nanoTime();
 				
 				//While there are still bytes left:
 				while (bytesLeftForThisFile > 0) {
 				
 					BTMessage message = peerCommHandler.getMessage();
-					
-					if (message.getType() == MessageType.KEEP_ALIVE) {
-						System.out.println("\tReceived keep-alive message. Taking no action.");
-						//again, do nothing for now. I have auto-keep alive set for this connection.
-					}
-					
+					System.out.println("\tNew message received.");
+					message.print();
+					System.out.println("\n\tBytes left for this file: " + bytesLeftForThisFile);
+					System.out.println("\tPieces left for this file: " + (torrentInfo.piece_hashes.length - pieceIndex));
+					System.out.println("\tCurrent piece: " + pieceIndex);
+					System.out.println("\tCurrent byte offset, within the current piece: " + pieceOffset);
+					System.out.println("\tNumber of bytes left to download for this piece: " + bytesLeftForThisPiece + "\n");
+
 					if (message.getType() == MessageType.HAVE || message.getType() == MessageType.BITFIELD) {
-						System.out.println("\tReceived \"have\" or bitfield message. Taking no action (for now).");
-						//do nothing for now. a have or bitfield message will be useful for the next project phase, but the RU peer definitely has everything.
+						peerCommHandler.sendMessage(MessageType.INTERESTED);
 					}
 
 					if (isNotChoked) {
 					
+						//If we get choked, wait.
 						if (message.getType() == MessageType.CHOKE) {
-							System.out.println("\tReceived choke message. Waiting for unchoke.");
+							System.out.println("\tReceived choke message. Waiting for unchoke.\n");
 							isNotChoked = false;
 							
 							continue;
 							
 						//Otherwise, check if we get a "block" message.
 						} else if (message.getType() == MessageType.PIECE) {
-							System.out.println("\tGot data; attempting to write this block.");
 							
 							//Write block into buffer and get the size of it.
 							pieceBuffer.write(message.getPayload());
@@ -253,26 +218,23 @@ public class RUBTClient {
 							bytesLeftForThisPiece -= blockLength;
 							pieceOffset += blockLength;
 							
-							System.out.println("\tThere are " + bytesLeftForThisPiece + " bytes left for this piece; we are looking for bytes now starting at offset "
-							+ pieceOffset + " bytes within this piece.") ;
-							
 							if (bytesLeftForThisPiece == 0) {
 								
 								//Only try to request next piece if SHA1 hashes match.
 								if (HashHandler.compareHash(torrentInfo.piece_hashes[pieceIndex].array(), HashHandler.getSHA1(pieceBuffer.toByteArray()))) {
-									System.out.println("Hash of received piece compared to known hash with a successful match. Writing to file.");
+									System.out.println("\tHash of received piece compared to known hash with a successful match. Writing to file.\n");
 									pieceIndex++;
 									bytesLeftForThisFile -= thisPieceLength;
+									pieceOffset = 0;
 									fileWriter.write(pieceBuffer.toByteArray());
-									
-									System.out.println("\tWill try to download next piece with index " + pieceIndex + ". There are " 
-									+ bytesLeftForThisFile + " bytes left to download.");
-									
+										
 									//If we have less bytes left than the standard piece length, go ahead and set piece length to bytes left
 									if (torrentInfo.piece_length > bytesLeftForThisFile) {
 										thisPieceLength = bytesLeftForThisFile;
+										bytesLeftForThisPiece = thisPieceLength;
 									} else {
 										thisPieceLength = torrentInfo.piece_length;
+										bytesLeftForThisPiece = thisPieceLength;
 									}
 								} else {
 									System.out.println("\tHash of received piece did not match known hash. Resetting and attempting to re-download.");
@@ -286,66 +248,42 @@ public class RUBTClient {
 							
 							//If we still have pieces to go.
 							if (pieceIndex < numPieces) {	
-								System.out.println("\tRequesting 16,384 bytes @ piece index " + pieceIndex + " and piece offset " + pieceOffset + " bytes.");
-								peerCommHandler.sendRequest(pieceIndex, pieceOffset, 16384);
+								if (bytesLeftForThisPiece >= 16384) {
+									peerCommHandler.sendRequest(pieceIndex, pieceOffset, 16384);
+								} else {
+									peerCommHandler.sendRequest(pieceIndex, pieceOffset, bytesLeftForThisPiece);
+								}
 							}
 						}
 					} else {
 						//If we get an unchoke message.
 						if (message.getType() == MessageType.UNCHOKE) {
-							System.out.println("\tUnchoke received.");
-							System.out.println("\tRequesting 16,384 bytes @ piece index " + pieceIndex + " and piece offset " + pieceOffset + " bytes.");
-							peerCommHandler.sendRequest(pieceIndex, pieceOffset, 16384);
+							//System.out.println("\tUnchoke received.\n");
 							isNotChoked = true;
+							peerCommHandler.sendRequest(pieceIndex, pieceOffset, bytesLeftForThisPiece);
 						}
 					}
 				}
 				
-				pieceBuffer.close();
+				downloadEnd = System.nanoTime();
+				
 				fileWriter.close();
 				peerCommHandler.closeConnection();
+				trackerCommHandler.sendCompleted();
+				
+				System.out.println("\tDownload completed and all connections closed. Tracker notified of download completion.");
+				System.out.println("\tThis download took approximately " + Math.round(((downloadEnd - downloadStart) / 1000000000.0)) + " seconds.\n");
 			} catch (BencodingException be) {
 				System.err.println("ERROR: The specified torrent file is not properly bencoded.\n");
 			} catch (IOException ioe) {
 				System.err.println("ERROR: An I/O error occured with error message \"" + ioe.getMessage() + "\"\n");
+				ioe.printStackTrace();
 			} catch (NoSuchAlgorithmException nsae) {
 				System.err.println("ERROR: Could not calculate the SHA1 hash of a piece of the torrent.\n"
                                  + nsae.getMessage() + "\n");
 			}
 			
-			System.out.println("---END DEBUG LOG---");
+			System.out.println("-----END-LOG-----");
 /*-----End-Logic-----*/
-	}
-
-	/**
-	 * Generates a 20-char unique peer ID.
-	 * 
-	 * @return the peer ID.
-	 */
-	private static String generatePeerID() {
-		String id = UUID.randomUUID().toString().replaceAll("-", "").substring(0, 20);
-		return id;
-	}
-
-	/**
-	 * Escapes any hex values found in a string so that the string can be used in a URL.
-	 * 
-	 * @param string = the string to be escaped
-	 * @return an HTTP escaped string
-	 */
-	private static String HTTPescape(String string) {
-		String escapedString = "";
-		
-		for (int i = 0; i < string.length(); i += 2) {
-			String substring = string.substring(i, i + 2);
-			
-			if (Integer.parseInt(substring, 16) != -1) {
-					escapedString += "%" + substring;
-			} else {
-				escapedString += substring;
-			}
-		}
-		
-		return escapedString;
 	}
 }

@@ -1,7 +1,12 @@
-//Thomas Brown
-
 package client;
 
+/**
+ * Object representation of a BitTorrent message.
+ * Get and set methods are uncommented.
+ * 
+ * @author thomasbrown
+ *
+ */
 public class BTMessage {
 	private MessageType type;
 	private int length;
@@ -52,5 +57,15 @@ public class BTMessage {
 	
 	public void setPayload(byte[] payload) {
 		this.payload = payload;
+	}
+	
+	public void print() {
+		System.out.println("\tLength: " + this.length);
+		System.out.println("\tMessage ID: " + this.msgID);
+		System.out.println("\tType: " + this.type);
+		if (this.payload != null) {
+			System.out.println("\tNumber of Bytes in Payload: " + this.payload.length);
+		}
+		
 	}
 }

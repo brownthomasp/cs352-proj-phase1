@@ -1,5 +1,12 @@
 package client;
 
+/**
+ * Object representation of a peer.
+ * Get and set methods are uncommented.
+ * 
+ * @author thomasbrown
+ *
+ */
 public class PeerInfo {
 	private String peerID;
 	private String IP;
